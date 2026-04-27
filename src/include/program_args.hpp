@@ -38,6 +38,7 @@ struct program_args_t {
     size_t max_socket_connections = 10;
     size_t max_npu_queue = 10;
     int port = -1; // default port
+    int idle_unload_seconds = 0;
     bool cors = false;
     bool sub_process_mode = false;
     
