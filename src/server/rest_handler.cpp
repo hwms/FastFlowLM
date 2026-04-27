@@ -171,7 +171,7 @@ static json normalize_template(json messages) {
 
 ///@return the rest handler
 RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args)
-    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), asr(args.asr), embed(args.embed), img_pre_resize(args.img_pre_resize), preemption(args.preemption){
+    : supported_models(models), downloader(downloader), default_model_tag(args.model_tag), current_model_tag(""), asr(args.asr), embed(args.embed), img_pre_resize(args.img_pre_resize), preemption(args.preemption), idle_unload_seconds(args.idle_unload_seconds), last_model_activity(std::chrono::steady_clock::now()){
     this->npu_device_inst = xrt::device(0);
 
     if (args.ctx_length != -1) {
@@ -227,6 +227,7 @@ RestHandler::~RestHandler() = default;
 ///@brief Ensure the model is loaded
 ///@param model_tag the model tag
 bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
+    std::lock_guard<std::mutex> lock(model_lifecycle_mutex);
     std::string ensure_tag = model_tag;
     if (current_model_tag != ensure_tag) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -259,6 +260,57 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag) {
         current_model_tag = ensure_tag;
     }
     return true;
+}
+
+void RestHandler::begin_model_request() {
+    active_model_requests.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(model_lifecycle_mutex);
+    last_model_activity = std::chrono::steady_clock::now();
+    idle_unload_generation.fetch_add(1, std::memory_order_relaxed);
+}
+
+void RestHandler::end_model_request() {
+    {
+        std::lock_guard<std::mutex> lock(model_lifecycle_mutex);
+        last_model_activity = std::chrono::steady_clock::now();
+    }
+    if (active_model_requests.fetch_sub(1, std::memory_order_relaxed) == 1) {
+        schedule_idle_unload();
+    }
+}
+
+void RestHandler::schedule_idle_unload() {
+    if (idle_unload_seconds <= 0) {
+        return;
+    }
+
+    const uint64_t generation = idle_unload_generation.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::weak_ptr<RestHandler> weak_self = weak_from_this();
+    std::thread([weak_self, generation, idle_seconds = idle_unload_seconds]() {
+        std::this_thread::sleep_for(std::chrono::seconds(idle_seconds));
+        if (auto self = weak_self.lock()) {
+            self->unload_idle_model_if_due(generation);
+        }
+    }).detach();
+}
+
+void RestHandler::unload_idle_model_if_due(uint64_t generation) {
+    if (active_model_requests.load(std::memory_order_relaxed) != 0 ||
+        idle_unload_generation.load(std::memory_order_relaxed) != generation) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(model_lifecycle_mutex);
+    const auto idle_for = std::chrono::steady_clock::now() - last_model_activity;
+    if (idle_for < std::chrono::seconds(idle_unload_seconds)) {
+        return;
+    }
+    if (auto_chat_engine != nullptr && active_model_requests.load(std::memory_order_relaxed) == 0) {
+        header_print("FLM", "Unloading idle model: " << current_model_tag);
+        auto_chat_engine.reset();
+        prompt_cache.reset();
+        current_model_tag = "model-faker";
+    }
 }
 
 ///@brief Ensure the asr model is loaded
@@ -442,7 +494,8 @@ void RestHandler::handle_show(const json& request,
 void RestHandler::handle_generate(const json& request,
                                  std::function<void(const json&)> send_response,
                                  StreamResponseCallback send_streaming_response,
-                                 std::shared_ptr<CancellationToken> cancellation_token) {
+                                  std::shared_ptr<CancellationToken> cancellation_token) {
+    ModelRequestScope request_scope(*this);
     try {
         std::string prompt = request["prompt"];
         bool stream = request.value("stream", true);
@@ -556,7 +609,8 @@ void RestHandler::handle_generate(const json& request,
 void RestHandler::handle_chat(const json& request,
                              std::function<void(const json&)> send_response,
                              StreamResponseCallback send_streaming_response,
-                             std::shared_ptr<CancellationToken> cancellation_token) {
+                              std::shared_ptr<CancellationToken> cancellation_token) {
+    ModelRequestScope request_scope(*this);
     try {
         nlohmann::ordered_json messages = request["messages"];
         bool stream = request.value("stream", false);
@@ -893,8 +947,9 @@ void RestHandler::handle_create(const json& request,
 void RestHandler::handle_openai_chat_completion(const json& request,
                                                std::function<void(const json&)> send_response,
                                                StreamResponseCallback send_streaming_response,
-                                               std::shared_ptr<CancellationToken> cancellation_token) {
+                                                std::shared_ptr<CancellationToken> cancellation_token) {
     static std::string model_used_for_last_message = "model-faker";
+    ModelRequestScope request_scope(*this);
     try {
         // Extract OpenAI-style parameters
         json current_messages = request["messages"];
@@ -1154,6 +1209,7 @@ void RestHandler::handle_openai_completion(const json& request,
     std::function<void(const json&)> send_response,
     StreamResponseCallback send_streaming_response,
     std::shared_ptr<CancellationToken> cancellation_token) {
+    ModelRequestScope request_scope(*this);
     try {
         // Extract OpenAI-style parameters
         std::string prompt = request["prompt"];

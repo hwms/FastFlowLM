@@ -22,6 +22,9 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <atomic>
+#include <chrono>
+#include <mutex>
 #include "prompt_cache.hpp"
 
 using json = nlohmann::ordered_json;
@@ -32,7 +35,7 @@ struct CancellationToken;
 ///@brief Stream callback type for sending streaming responses
 using StreamResponseCallback = std::function<void(const json&, bool)>; // data, is_final
 
-class RestHandler {
+class RestHandler : public std::enable_shared_from_this<RestHandler> {
 public:
     RestHandler(model_list& models, ModelDownloader& downloader, program_args_t& args);
     ~RestHandler();
@@ -108,9 +111,19 @@ public:
         std::shared_ptr<CancellationToken> cancellation_token = nullptr);
 
 private:
+    struct ModelRequestScope {
+        explicit ModelRequestScope(RestHandler& handler) : handler(handler) { handler.begin_model_request(); }
+        ~ModelRequestScope() { handler.end_model_request(); }
+        RestHandler& handler;
+    };
+
     bool ensure_model_loaded(const std::string& model_tag);
     void ensure_asr_model_loaded(const std::string& model_tag);
     void ensure_embed_model_loaded(const std::string& model_tag);
+    void begin_model_request();
+    void end_model_request();
+    void schedule_idle_unload();
+    void unload_idle_model_if_due(uint64_t generation);
     void configure_chat_engine_parameters(const json& options, const json& request);
     json build_nstream_response(std::string response_text);
 
@@ -135,4 +148,9 @@ private:
     std::string last_question;
     bool preemption;
     PromptCache prompt_cache;
+    int idle_unload_seconds;
+    std::atomic<int> active_model_requests{0};
+    std::atomic<uint64_t> idle_unload_generation{0};
+    std::chrono::steady_clock::time_point last_model_activity;
+    std::mutex model_lifecycle_mutex;
 };

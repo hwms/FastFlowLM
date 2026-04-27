@@ -77,6 +77,8 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
              "Set the server address (for serve command)")
             ("port,p", po::value<int>(&parsed_args.port)->default_value(-1), 
              "Set the server port number (for serve command)")
+            ("idle-unload", po::value<int>(&parsed_args.idle_unload_seconds)->default_value(0),
+             "Unload the active model after N idle seconds (0 disables, for serve command)")
             ("force", po::bool_switch(&parsed_args.force_redownload),
              "Force re-download even if model exists (for pull command)")
             ("filter", po::value<std::string>(&parsed_args.list_filter)->default_value("all"),
@@ -190,6 +192,16 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
                 std::cerr << "Error: The cors option is only supported with the serve command! " << std::endl;
                 return false;
             }
+            if (vm.count("idle-unload") && parsed_args.idle_unload_seconds != 0)
+            {
+                std::cerr << "Error: The idle-unload option is only supported with the serve command! " << std::endl;
+                return false;
+            }
+        }
+
+        if (parsed_args.idle_unload_seconds < 0) {
+            std::cerr << "Error: idle-unload must be zero or greater!" << std::endl;
+            return false;
         }
 
         // Handle all options
