@@ -61,6 +61,16 @@ flm serve -a 1
 
 Send audio to `POST /v1/audio/transcriptions` via any OpenAI Client or Open WebUI.
 
+Set `response_format=verbose_json` to receive `duration`, timestamped
+`segments`, the raw model `no_speech_probability`, and
+`chunk_no_speech_probabilities` in addition to the transcript text. Segment
+timestamps are clipped to the real input duration, not Whisper's padded
+30-second window.
+
+> The Q4 NPU model's raw `<|nospeech|>` probability is diagnostic output, not a
+> production silence gate. Use an external VAD before transcription when false
+> speech on silent or sparse audio must be prevented.
+
 > see more API details here → [/v1/audio/](https://platform.openai.com/docs/api-reference/audio)
 
 **Example 1**: OpenAI Client

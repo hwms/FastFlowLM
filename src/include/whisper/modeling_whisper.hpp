@@ -110,6 +110,7 @@ private:
     static constexpr int WINDOW_SAMPLES = FS * WINDOW_LENGTH;
     static constexpr int start_of_transcript = 50258;
     static constexpr int start_of_prev_token = 50362;
+    static constexpr int no_speech_token = 50363;
     static constexpr int no_time_stamp_token = 50364;
     static constexpr int translate_token = 50359;
     static constexpr int transcribe_token = 50360;
@@ -149,6 +150,7 @@ private:
     int bos_token_id;
     std::vector<int> eos_token_ids;
     std::vector<float> token_time_map;
+    std::vector<float> last_no_speech_probabilities;
     int token_time_map_offset;
     int total_time_stamps;
 
@@ -183,6 +185,8 @@ private:
     int _sample_in_language(buffer<bf16>& logits);
 
     int _sample_in_time_stamp(buffer<bf16>& logits);
+
+    float _softmax_probability(const buffer<bf16>& logits, int token_id) const;
 
     inline bool _is_valid_utf8(const std::string& input) {
         size_t i = 0;
@@ -248,5 +252,11 @@ public:
     bool load_audio(std::string& audio_path);
     bool load_audio(std::vector<uint8_t>& audio_data);
     std::pair<std::string, std::string> generate(whisper_task_type_t task, bool enable_time_stamp, bool return_time_stamp, std::ostream& os);
+    float audio_duration_seconds() const {
+        return static_cast<float>(audio_buffer.size()) / static_cast<float>(FS);
+    }
+    const std::vector<float>& no_speech_probabilities() const {
+        return last_no_speech_probabilities;
+    }
     void setup_tokenizer(std::string model_path);
 };

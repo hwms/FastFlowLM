@@ -11,6 +11,7 @@
 #include "streaming_ostream.hpp"
 #include "streaming_ostream_openai.hpp"
 #include "image/image_reader.hpp"
+#include <algorithm>
 #include <sstream>
 #include <iostream>
 #include <thread>
@@ -1312,8 +1313,11 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
             bool want_verbose = (response_format == "verbose_json");
             std::string raw_output;
             std::string language;
+            float audio_duration = 0.0f;
+            std::vector<float> no_speech_probabilities;
 #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
             this->whisper_engine->load_audio(audio_raw);
+            audio_duration = this->whisper_engine->audio_duration_seconds();
             header_print("FLM", "Transforming audio to text...");
             std::cout << "Audio content: " << std::flush;
             std::pair<std::string, std::string> audio_result = this->whisper_engine->generate(
@@ -1323,6 +1327,7 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
                 std::cout);
             raw_output = audio_result.first;
             language = audio_result.second;
+            no_speech_probabilities = this->whisper_engine->no_speech_probabilities();
             std::cout << std::endl;
 #else
             throw std::runtime_error("ASR models are not supported in this build");
@@ -1343,10 +1348,16 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
 
                 json segments = json::array();
                 std::string plain_text;
-                float max_end = 0.0f;
+                json segment_no_speech_probability = nullptr;
+                if (no_speech_probabilities.size() == 1) {
+                    segment_no_speech_probability = no_speech_probabilities.front();
+                }
                 for (size_t i = 0; i + 1 < markers.size(); ++i) {
                     float seg_start = std::get<0>(markers[i]);
                     float seg_end = std::get<0>(markers[i + 1]);
+                    seg_start = std::clamp(seg_start, 0.0f, audio_duration);
+                    seg_end = std::clamp(seg_end, 0.0f, audio_duration);
+                    if (seg_end <= seg_start) continue;
                     size_t text_begin = std::get<2>(markers[i]);
                     size_t text_end = std::get<1>(markers[i + 1]);
                     if (text_end < text_begin) continue;
@@ -1367,11 +1378,10 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
                         {"temperature", 0.0},
                         {"avg_logprob", 0.0},
                         {"compression_ratio", 0.0},
-                        {"no_speech_prob", 0.0}
+                        {"no_speech_prob", segment_no_speech_probability}
                     });
                     if (!plain_text.empty()) plain_text += " ";
                     plain_text += seg_text;
-                    if (seg_end > max_end) max_end = seg_end;
                 }
 
                 // Fallback: if no segments were emitted (e.g. fewer than two
@@ -1386,7 +1396,9 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
                         size_t fb = fallback_text.find_last_not_of(" \t\n\r");
                         fallback_text = fallback_text.substr(fa, fb - fa + 1);
                         float fb_start = markers.empty() ? 0.0f : std::get<0>(markers.front());
-                        float fb_end = markers.empty() ? 0.0f : std::get<0>(markers.back());
+                        float fb_end = markers.size() < 2
+                            ? audio_duration
+                            : std::get<0>(markers.back());
                         segments.push_back({
                             {"id", 0},
                             {"seek", 0},
@@ -1397,19 +1409,20 @@ void RestHandler::handle_openai_audio_transcriptions(const json& request,
                             {"temperature", 0.0},
                             {"avg_logprob", 0.0},
                             {"compression_ratio", 0.0},
-                            {"no_speech_prob", 0.0}
+                            {"no_speech_prob", segment_no_speech_probability}
                         });
                         plain_text = fallback_text;
-                        if (fb_end > max_end) max_end = fb_end;
                     }
                 }
 
                 response = {
                     {"task", "transcribe"},
                     {"language", language},
-                    {"duration", max_end},
+                    {"duration", audio_duration},
                     {"text", plain_text},
                     {"segments", segments},
+                    {"no_speech_probability", segment_no_speech_probability},
+                    {"chunk_no_speech_probabilities", no_speech_probabilities},
                     {"model", model}
                 };
             } else {

@@ -6,6 +6,9 @@
 /// \note This is a source file for the modeling_whisper class
 #include "whisper/modeling_whisper.hpp"
 
+#include <algorithm>
+#include <limits>
+
 
 Whisper::Whisper(flm_rt::device* npu_device_inst){
     this->device = npu_device_inst;
@@ -118,6 +121,7 @@ std::pair<std::string, std::string> Whisper::generate(whisper_task_type_t task, 
     bool last_chunk = false;
     std::string result;
     std::string language_detected;
+    this->last_no_speech_probabilities.clear();
     if ((!enable_time_stamp) && (return_time_stamp)){
         header_print("Error", "Return_time_stamp is true but timestamp is not enabled!");
         return std::make_pair("", "");
@@ -146,6 +150,8 @@ std::pair<std::string, std::string> Whisper::generate(whisper_task_type_t task, 
 
         last_idx = start_of_transcript; // the first token is fixed
         buffer<bf16> logits = this->whisper_engine->decode_audio(last_idx);
+        this->last_no_speech_probabilities.push_back(
+            this->_softmax_probability(logits, no_speech_token));
         last_idx = this->_sample_in_language(logits);
       
         // std::cout << "Language detected: " << this->tokenizer->run_time_decoder(last_idx) << "(" << langmap::to_language_name(this->tokenizer->run_time_decoder(last_idx)) << ")" << std::endl;
@@ -245,6 +251,33 @@ std::pair<std::string, std::string> Whisper::generate(whisper_task_type_t task, 
         
     }
     return std::make_pair(result, langmap::to_language_name(language_detected));
+}
+
+float Whisper::_softmax_probability(const buffer<bf16>& logits, int token_id) const {
+    if (token_id < 0 || static_cast<size_t>(token_id) >= logits.size() || logits.size() == 0) {
+        return 0.0f;
+    }
+
+    float max_logit = -std::numeric_limits<float>::infinity();
+    for (size_t index = 0; index < logits.size(); ++index) {
+        max_logit = std::max(max_logit, static_cast<float>(logits[index]));
+    }
+    if (!std::isfinite(max_logit)) {
+        return 0.0f;
+    }
+
+    double denominator = 0.0;
+    for (size_t index = 0; index < logits.size(); ++index) {
+        denominator += std::exp(
+            static_cast<double>(static_cast<float>(logits[index]) - max_logit));
+    }
+    if (!std::isfinite(denominator) || denominator <= 0.0) {
+        return 0.0f;
+    }
+
+    const double numerator = std::exp(
+        static_cast<double>(static_cast<float>(logits[token_id]) - max_logit));
+    return static_cast<float>(numerator / denominator);
 }
 
 
